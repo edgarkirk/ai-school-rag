@@ -1,0 +1,10 @@
+# Core dependencies
+python-dotenv>=1.0.0
+openai>=1.10.0
+
+# RAG dependencies - using compatible versions
+langchain-text-splitters>=0.0.1
+chromadb>=0.4.22
+
+# Visualization
+matplotlib>=3.8.0
