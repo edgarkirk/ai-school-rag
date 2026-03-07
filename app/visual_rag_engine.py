@@ -7,7 +7,6 @@ Automatically generates visualizations for ranking queries.
 import re
 import logging
 from typing import Dict, Any, List, Tuple, Optional
-from pathlib import Path
 
 import matplotlib
 matplotlib.use('Agg')
@@ -17,7 +16,6 @@ from .retriever import RAGQueryEngine
 from .constants import (
     VALID_NUTRIENTS,
     VALID_PRODUCTS,
-    CHART_DPI,
     BAR_CHART_SIZE,
     PIE_CHART_SIZE,
     LINE_CHART_SIZE,
@@ -35,10 +33,8 @@ class VisualRAGEngine(RAGQueryEngine):
     for ranking and comparison queries.
     """
 
-    def __init__(self, retriever, chat_client, visualization_dir: str = "visualizations"):
+    def __init__(self, retriever, chat_client):
         super().__init__(retriever, chat_client)
-        self.visualization_dir = Path(visualization_dir)
-        self.visualization_dir.mkdir(parents=True, exist_ok=True)
 
     def _detect_ranking_query(self, question: str) -> Optional[Dict[str, Any]]:
         """
@@ -91,48 +87,62 @@ class VisualRAGEngine(RAGQueryEngine):
 
         return None
 
-    def _extract_nutrient_from_text(self, text: str, nutrient: str) -> Tuple[float, float]:
-        """
-        Extract min and max values for a nutrient from text.
-        """
-        # Normalize nutrient name (handle plural/singular)
-        nutrient_lower = nutrient.lower()
-        if nutrient_lower in ['calorie', 'calories']:
-            nutrient_variations = ['calorie', 'calories']
-        elif nutrient_lower in ['protein', 'proteins']:
-            nutrient_variations = ['protein', 'proteins']
-        elif nutrient_lower in ['carbohydrate', 'carbohydrates', 'carb', 'carbs']:
-            nutrient_variations = ['carbohydrate', 'carbohydrates', 'carb', 'carbs']
-        else:
-            nutrient_variations = [nutrient_lower]
+    def _get_nutrient_variations(self, nutrient: str) -> List[str]:
+        """Get all variations of a nutrient name."""
+        variations_map = {
+            'calorie': ['calorie', 'calories'],
+            'calories': ['calorie', 'calories'],
+            'protein': ['protein', 'proteins'],
+            'proteins': ['protein', 'proteins'],
+            'carbohydrate': ['carbohydrate', 'carbohydrates', 'carb', 'carbs'],
+            'carbohydrates': ['carbohydrate', 'carbohydrates', 'carb', 'carbs'],
+            'carb': ['carbohydrate', 'carbohydrates', 'carb', 'carbs'],
+            'carbs': ['carbohydrate', 'carbohydrates', 'carb', 'carbs'],
+        }
+        return variations_map.get(nutrient.lower(), [nutrient.lower()])
 
-        # Try to match ranges first
+    def _extract_nutrient_from_text(self, text: str, nutrient: str) -> Tuple[float, float]:
+        """Extract min and max values for a nutrient from text."""
+        variations = self._get_nutrient_variations(nutrient)
+        variations_pattern = '|'.join(variations)
+
+        # Range patterns
         range_patterns = [
-            rf"(?:{'|'.join(nutrient_variations)})\s+is\s+commonly\s+(\d+(?:\.\d+)?)[–\-—](\d+(?:\.\d+)?)\s*g",
-            rf"(?:{'|'.join(nutrient_variations)})\s+often\s+falls?\s+around\s+(\d+(?:\.\d+)?)[–\-—](\d+(?:\.\d+)?)\s*(?:kcal|g)",
-            rf"(?:{'|'.join(nutrient_variations)})\s+is\s+often\s+(\d+(?:\.\d+)?)[–\-—](\d+(?:\.\d+)?)\s*g",
+            rf"(?:{variations_pattern})\s+is\s+commonly\s+(\d+(?:\.\d+)?)[–\-—](\d+(?:\.\d+)?)\s*g",
+            rf"(?:{variations_pattern})\s+often\s+falls?\s+around\s+(\d+(?:\.\d+)?)[–\-—](\d+(?:\.\d+)?)\s*(?:kcal|g)",
+            rf"(?:{variations_pattern})\s+is\s+often\s+(\d+(?:\.\d+)?)[–\-—](\d+(?:\.\d+)?)\s*g",
         ]
 
         for pattern in range_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
+            if match := re.search(pattern, text, re.IGNORECASE):
                 return (float(match.group(1)), float(match.group(2)))
 
-        # Try single values - most common format: "contains 1882.1 calories per serving"
-        single_value_patterns = [
-            rf"contains\s+(\d+(?:\.\d+)?)\s+(?:{'|'.join(nutrient_variations)})",  # "contains 1882.1 calories"
-            rf"provides\s+(\d+(?:\.\d+)?)\s*g\s+of\s+(?:{'|'.join(nutrient_variations)})",  # "provides 51.87g of protein"
-            rf"(\d+(?:\.\d+)?)\s*g\s+of\s+(?:{'|'.join(nutrient_variations)})",  # "51.87g of protein"
-            rf"(?:{'|'.join(nutrient_variations)})[:\s]+(\d+(?:\.\d+)?)",  # "Protein: 51.87" or "Calories 1882"
+        # Single value patterns
+        single_patterns = [
+            rf"contains\s+(\d+(?:\.\d+)?)\s+(?:{variations_pattern})",
+            rf"provides\s+(\d+(?:\.\d+)?)\s*g\s+of\s+(?:{variations_pattern})",
+            rf"(\d+(?:\.\d+)?)\s*g\s+of\s+(?:{variations_pattern})",
+            rf"(?:{variations_pattern})[:\s]+(\d+(?:\.\d+)?)",
         ]
 
-        for pattern in single_value_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
+        for pattern in single_patterns:
+            if match := re.search(pattern, text, re.IGNORECASE):
                 value = float(match.group(1))
                 return (value, value)
 
         return (0.0, 0.0)
+
+    def _matches_filter(self, metadata: Dict, content: str, product_filter: Optional[str]) -> bool:
+        """Check if product matches the filter."""
+        if not product_filter:
+            return True
+
+        filter_lower = product_filter.lower()
+        return any([
+            filter_lower in metadata.get('brand', '').lower(),
+            filter_lower in metadata.get('product', '').lower(),
+            filter_lower in content[:300].lower()
+        ])
 
     def _extract_structured_data(
         self,
@@ -142,90 +152,47 @@ class VisualRAGEngine(RAGQueryEngine):
     ) -> List[Dict]:
         """
         Extract structured data from sources.
-        Deduplicates by brand+product, keeping only the highest value.
+        Deduplicates by brand+product, keeping highest value.
         """
-        products_dict = {}  # Use dict to deduplicate by brand+product
+        products_dict = {}
 
         for source in sources:
             metadata = source.get('metadata', {})
-            brand = metadata.get('brand', 'Unknown')
-            product = metadata.get('product', 'Unknown')
-            size = metadata.get('size', '')
             content = source.get('content', '')
 
-            # Create key WITHOUT size for deduplication
-            # This ensures "Double Cheeseburger (Large)" and "Double Cheeseburger (Regular)"
-            # are treated as the same product
-            key = f"{brand}|{product}"
-
-            # Filter by product type if specified
-            # Check: brand, product name, or content (more lenient matching)
-            if product_filter:
-                filter_lower = product_filter.lower()
-                brand_lower = brand.lower()
-                product_lower = product.lower()
-                content_lower = content.lower()
-
-                # Pass if filter appears in brand, product name, or beginning of content
-                match_found = (
-                    filter_lower in brand_lower or
-                    filter_lower in product_lower or
-                    filter_lower in content_lower[:300]
-                )
-
-                if not match_found:
-                    continue
+            # Filter by product type
+            if not self._matches_filter(metadata, content, product_filter):
+                continue
 
             # Extract nutrient values
             min_val, max_val = self._extract_nutrient_from_text(content, nutrient.capitalize())
 
-            # Validation: Log extraction for debugging
-            if max_val > 0:
-                # Successful extraction
-                pass
-            else:
-                # Failed extraction - skip this source
+            if max_val <= 0:
                 continue
 
-            if max_val > 0:
-                # If this product already exists, keep the one with higher max value
-                # or if same max, prefer the one with larger size info
-                if key in products_dict:
-                    existing = products_dict[key]
-                    # Keep the one with higher max value, or if equal, keep existing
-                    if max_val > existing['max']:
-                        products_dict[key] = {
-                            'brand': brand,
-                            'product': product,
-                            'size': size,
-                            'min': min_val,
-                            'max': max_val,
-                            'avg': (min_val + max_val) / 2
-                        }
-                    elif max_val == existing['max'] and size and not existing.get('size'):
-                        # Same value but this one has size info, use it
-                        products_dict[key] = {
-                            'brand': brand,
-                            'product': product,
-                            'size': size,
-                            'min': min_val,
-                            'max': max_val,
-                            'avg': (min_val + max_val) / 2
-                        }
-                else:
-                    products_dict[key] = {
-                        'brand': brand,
-                        'product': product,
-                        'size': size,
-                        'min': min_val,
-                        'max': max_val,
-                        'avg': (min_val + max_val) / 2
-                    }
+            # Deduplicate by brand+product (without size)
+            brand = metadata.get('brand', 'Unknown')
+            product = metadata.get('product', 'Unknown')
+            size = metadata.get('size', '')
+            key = f"{brand}|{product}"
 
-        # Convert dict to list and sort by max value
-        products = list(products_dict.values())
-        products.sort(key=lambda x: x['max'], reverse=True)
-        return products
+            product_data = {
+                'brand': brand,
+                'product': product,
+                'size': size,
+                'min': min_val,
+                'max': max_val,
+                'avg': (min_val + max_val) / 2
+            }
+
+            # Keep product with higher max value
+            if key not in products_dict or max_val > products_dict[key]['max']:
+                products_dict[key] = product_data
+            elif max_val == products_dict[key]['max'] and size and not products_dict[key].get('size'):
+                products_dict[key] = product_data
+
+        # Sort by max value descending
+        return sorted(products_dict.values(), key=lambda x: x['max'], reverse=True)
 
     def _prepare_labels(self, products: List[Dict]) -> List[str]:
         """Prepare product labels for charts."""
@@ -247,8 +214,8 @@ class VisualRAGEngine(RAGQueryEngine):
         nutrient: str,
         top_n: int,
         product_filter: Optional[str] = None
-    ) -> str:
-        """Generate bar chart and return filename."""
+    ):
+        """Generate bar chart and return figure."""
         if not products:
             return None
 
@@ -279,15 +246,9 @@ class VisualRAGEngine(RAGQueryEngine):
             ax.text(bar.get_x() + bar.get_width()/2., height,
                    f'{int(height)}', ha='center', va='bottom', fontsize=8)
 
-        filename = f"top_{top_n}_{product_filter or 'products'}_{nutrient}_bar.png"
-        filepath = self.visualization_dir / filename
-
         plt.tight_layout()
-        plt.savefig(filepath, dpi=CHART_DPI, bbox_inches='tight')
-        plt.close()
-
-        logger.info(f"Bar chart saved: {filepath}")
-        return str(filepath)
+        logger.info("Bar chart generated")
+        return fig
 
     def _generate_pie_chart(
         self,
@@ -295,8 +256,8 @@ class VisualRAGEngine(RAGQueryEngine):
         nutrient: str,
         top_n: int,
         product_filter: Optional[str] = None
-    ) -> str:
-        """Generate pie chart and return filename."""
+    ):
+        """Generate pie chart and return figure."""
         if not products:
             return None
 
@@ -319,15 +280,9 @@ class VisualRAGEngine(RAGQueryEngine):
         legend_labels = [f"{label}: {val:.1f}{unit}" for label, val in zip(labels, values)]
         ax.legend(legend_labels, loc='center left', bbox_to_anchor=(1, 0, 0.5, 1), fontsize=8)
 
-        filename = f"top_{top_n}_{product_filter or 'products'}_{nutrient}_pie.png"
-        filepath = self.visualization_dir / filename
-
         plt.tight_layout()
-        plt.savefig(filepath, dpi=CHART_DPI, bbox_inches='tight')
-        plt.close()
-
-        logger.info(f"Pie chart saved: {filepath}")
-        return str(filepath)
+        logger.info("Pie chart generated")
+        return fig
 
     def _generate_line_chart(
         self,
@@ -335,8 +290,8 @@ class VisualRAGEngine(RAGQueryEngine):
         nutrient: str,
         top_n: int,
         product_filter: Optional[str] = None
-    ) -> str:
-        """Generate line chart and return filename."""
+    ):
+        """Generate line chart and return figure."""
         if not products:
             return None
 
@@ -372,15 +327,9 @@ class VisualRAGEngine(RAGQueryEngine):
         for i, val in enumerate(max_values):
             ax.text(i, val, f'{int(val)}', ha='center', va='bottom', fontsize=8)
 
-        filename = f"top_{top_n}_{product_filter or 'products'}_{nutrient}_line.png"
-        filepath = self.visualization_dir / filename
-
         plt.tight_layout()
-        plt.savefig(filepath, dpi=CHART_DPI, bbox_inches='tight')
-        plt.close()
-
-        logger.info(f"Line chart saved: {filepath}")
-        return str(filepath)
+        logger.info("Line chart generated")
+        return fig
 
     def query(
         self,
@@ -417,23 +366,23 @@ class VisualRAGEngine(RAGQueryEngine):
                 chart_type = ranking_info['chart_type']
 
                 if chart_type == CHART_TYPE_PIE:
-                    chart_file = self._generate_pie_chart(
+                    chart_fig = self._generate_pie_chart(
                         products, ranking_info['nutrient'],
                         ranking_info['top_n'], ranking_info['filter']
                     )
                 elif chart_type == CHART_TYPE_LINE:
-                    chart_file = self._generate_line_chart(
+                    chart_fig = self._generate_line_chart(
                         products, ranking_info['nutrient'],
                         ranking_info['top_n'], ranking_info['filter']
                     )
                 else:
-                    chart_file = self._generate_bar_chart(
+                    chart_fig = self._generate_bar_chart(
                         products, ranking_info['nutrient'],
                         ranking_info['top_n'], ranking_info['filter']
                     )
 
-                if chart_file:
-                    response['visualization'] = chart_file
+                if chart_fig:
+                    response['visualization'] = chart_fig
                     response['extracted_data'] = products
                     response['chart_type'] = chart_type
             else:

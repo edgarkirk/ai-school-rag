@@ -37,39 +37,36 @@ class ComparisonRetriever:
 
         Returns:
             Tuple of (brand_list, comparison_type) or None
-            comparison_type can be: 'vs', 'compare', 'difference'
         """
         query_lower = query.lower()
 
-        # Patterns for comparison queries
-        comparison_patterns = [
-            r'compare\s+(.+?)\s+vs\.?\s+(.+?)(?:\s+on|\s+in|\s+for|$)',       # "compare A vs B"
-            r'compare\s+(.+?)\s+and\s+(.+?)(?:\s+on|\s+in|\s+for|$)',         # "compare A and B"
-            r'(.+?)\s+vs\.?\s+(.+?)(?:\s+comparison|\s+on|\s+in|\s+for|$)',   # "A vs B"
-            r'difference\s+between\s+(.+?)\s+and\s+(.+?)(?:\s+on|\s+in|$)',   # "difference between A and B"
-            r'which\s+is\s+better[,:]?\s+(.+?)\s+or\s+(.+?)(?:\s+for|$)',     # "which is better: A or B"
+        patterns = [
+            r'compare\s+(.+?)\s+vs\.?\s+(.+?)(?:\s+on|\s+in|\s+for|$)',
+            r'compare\s+(.+?)\s+and\s+(.+?)(?:\s+on|\s+in|\s+for|$)',
+            r'(.+?)\s+vs\.?\s+(.+?)(?:\s+comparison|\s+on|\s+in|\s+for|$)',
+            r'difference\s+between\s+(.+?)\s+and\s+(.+?)(?:\s+on|\s+in|$)',
+            r'which\s+is\s+better[,:]?\s+(.+?)\s+or\s+(.+?)(?:\s+for|$)',
         ]
 
-        for pattern in comparison_patterns:
-            match = re.search(pattern, query_lower, re.IGNORECASE)
-            if match:
-                brand1 = match.group(1).strip()
-                brand2 = match.group(2).strip()
+        for pattern in patterns:
+            if match := re.search(pattern, query_lower, re.IGNORECASE):
+                brands = [match.group(1).strip(), match.group(2).strip()]
 
                 # Clean up common words
-                for word in [' on ', ' in ', ' for ', ' burger', ' burgers', ' product', ' products']:
-                    brand1 = brand1.replace(word, '').strip()
-                    brand2 = brand2.replace(word, '').strip()
+                cleanup_words = [' on ', ' in ', ' for ', ' burger', ' burgers', ' product', ' products']
+                brands = [
+                    next((b.replace(word, '').strip() for word in cleanup_words if word in b), b)
+                    for b in brands
+                ]
 
                 # Determine comparison type
-                if 'vs' in query_lower or 'versus' in query_lower:
-                    comp_type = 'vs'
-                elif 'difference' in query_lower:
-                    comp_type = 'difference'
-                else:
-                    comp_type = 'compare'
+                comp_type = (
+                    'vs' if 'vs' in query_lower or 'versus' in query_lower
+                    else 'difference' if 'difference' in query_lower
+                    else 'compare'
+                )
 
-                return ([brand1, brand2], comp_type)
+                return (brands, comp_type)
 
         return None
 
